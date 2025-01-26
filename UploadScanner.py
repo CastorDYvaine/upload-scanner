@@ -654,18 +654,16 @@ class BurpExtender(IBurpExtender, IScannerCheck,
             print e
 
     def save_project_setting(self, name, value):
-        request = """GET /"""+name+""" HTTP/1.0
-        # You can ignore this item in the site map. It was created by the UploadScanner extension.
-        # The reason is that the Burp API is missing a certain functionality to save settings.
-        # TODO Burp API limitation: This is a hackish way to be able to store project-scope settings
-        # We don't want to restore requests/responses of tabs in a totally different Burp project
-        # However, unfortunately there is no saveExtensionProjectSetting in the Burp API :(
-        # So we have to abuse the addToSiteMap API to store project-specific things
-
-        # Even when using this hack we currently cannot persist Collaborator interaction checks
-        # (IBurpCollaboratorClientContext is not serializable and Threads loose their Python class
-        # functionality when unloaded) due to Burp API limitations.
-        """
+        request = "GET /"+name+" HTTP/1.0\r\n\r\n" \
+                  "You can ignore this item in the site map. It was created by the UploadScanner extension. The \n" \
+                  "reason is that the Burp API is missing a certain functionality to save settings. \n" \
+                  "TODO Burp API limitation: This is a hackish way to be able to store project-scope settings.\n" \
+                  "We don't want to restore requests/responses of tabs in a totally different Burp project.\n" \
+                  "However, unfortunately there is no saveExtensionProjectSetting in the Burp API :(\n" \
+                  "So we have to abuse the addToSiteMap API to store project-specific things\n" \
+                  "Even when using this hack we currently cannot persist Collaborator interaction checks\n" \
+                  "(IBurpCollaboratorClientContext is not serializable and Threads loose their Python class\n" \
+                  "functionality when unloaded) due to Burp API limitations."
         response = None
         if value:
             response = "HTTP/1.1 200 OK\r\n" + value
@@ -922,7 +920,25 @@ class BurpExtender(IBurpExtender, IScannerCheck,
                             else:
                                 issue_copy.detail = issue_copy.detail.replace(BurpExtender.MARKER_URL_CONTENT,
                                                                               "UNKNOWN")
-
+                        if matcher.check_xss:
+                            content_disposition = False
+                            for header in headers:
+                                if header.lower().startswith("content-disposition: attachment"):
+                                    # This is a special case for "Content-Disposition: attachment" handling
+                                    desc = "<br><br>This response includes the 'Content-Disposition: attachment' header. " \
+                                           "This means the file is not shown inline, but downloaded in browsers. " \
+                                           "So this might be unexploitable. However, as there were so many bypasses " \
+                                           "for this in the past, this is still flagged as an issue. Certain old " \
+                                           "browsers could still be convinced into inlining the file and therefore " \
+                                           "execute the XSS payload. Moreover, browser plugins (flash/pdf/Java) might " \
+                                           "also not honor the Content-Disposition header. There have also been browser " \
+                                           "bugs that allowed executing the XSS. Moreover, an HTTP header injection can " \
+                                           "be used to still execute the XSS. See " \
+                                           "https://markitzeroday.com/xss/bypass/2018/04/17/defeating-content-disposition.html" \
+                                           " for further information."
+                                    issue_copy.detail += desc
+                                    issue_copy.severityPy = "Tentative"
+                                    break
                         self._create_download_scan_issue(base_request_response, issue_copy)
 
                         # As the matcher was now triggered, we can remove it as it should not trigger again,
@@ -2504,17 +2520,37 @@ Response.write(a&c&b)
             # External Image with <image xlink
             content_xlink = base_svg.replace(text_tag, '<image height="30" width="30" xlink:href="{}image.jpeg" />'.format(BurpExtender.MARKER_COLLAB_URL))
             basename = BurpExtender.DOWNLOAD_ME + self.FILE_START + "SvgXlink"
-            name = "XXE/SSRF via SVG" # Xlink"
+            name = "XXE/SSRF via SVG"  # Xlink
             severity = "High"
             confidence = "Certain"
             detail = "A Burp Colaborator interaction was detected when uploading an SVG image with an Xlink reference " \
-                     "which contains a burp colaborator URL. This means that Server Side Request Forgery is possible. " \
-                     'The payload was <image height="30" width="30" xlink:href="{}mage.jpeg" /> . ' + \
+                     "which contains a burp collaborator URL. This means that Server Side Request Forgery is possible. " \
+                     'The payload was <image xlink:href="{}" /> . ' + \
                      "Usually you will be able to read local files, eg. local pictures. " \
                      "Interactions:<br><br>".format(BurpExtender.MARKER_COLLAB_URL)
             issue = self._create_issue_template(injector.get_brr(), name, detail, confidence, severity)
             colab_tests.extend(self._send_collaborator(injector, burp_colab, self.SVG_TYPES, basename, content_xlink, issue,
                                                   redownload=True))
+
+            # External iFrame according to https://twitter.com/akhilreni_hs/status/1113762867881185281 and
+            # https://gist.github.com/akhil-reni/5ed75c28a5406c300597431eafcdae2d
+            content_iframe = '<g><foreignObject width="{}" height="{}"><body xmlns="http://www.w3.org/1999/xhtml">' \
+                             '<iframe src="{}"></iframe></body></foreignObject></g>'.format(str(injector.opts.image_width),
+                                                                                            str(injector.opts.image_height),
+                                                                                            BurpExtender.MARKER_COLLAB_URL)
+            basename = BurpExtender.DOWNLOAD_ME + self.FILE_START + "SvgIframe"
+            name = "XXE/SSRF via SVG"  # Iframe
+            severity = "High"
+            confidence = "Certain"
+            detail = "A Burp Colaborator interaction was detected when uploading an SVG image with an iframe reference " \
+                     "which contains a burp collaborator URL. This means that Server Side Request Forgery is possible. " \
+                     'The payload was <iframe src="{}"> . ' + \
+                     "Usually you will be able to read local files, eg. local pictures. " \
+                     "Interactions:<br><br>".format(BurpExtender.MARKER_COLLAB_URL)
+            issue = self._create_issue_template(injector.get_brr(), name, detail, confidence, severity)
+            colab_tests.extend(self._send_collaborator(injector, burp_colab, self.SVG_TYPES, basename, content_iframe, issue,
+                                                       redownload=True))
+
 
             # What if the server simply reads the SVG and turn it into a JPEG that has the content?
             # That will be hard to detect (would need something like OCR on JPEG), but at least the user
@@ -2544,7 +2580,7 @@ Response.write(a&c&b)
             # Now let's do the generic ones from the Xxe class
             for payload_desc, technique_name, svg in Xxe.get_payloads(base_svg, root_tag, text_tag, 'text'):
                 basename = BurpExtender.DOWNLOAD_ME + self.FILE_START + "XxeSvg" + technique_name
-                name = "XXE/SSRF via SVG" # " + technique_name
+                name = "XXE/SSRF via SVG"  # " + technique_name
                 severity = "Medium"
                 confidence = "Certain"
                 detail = "A Burp Colaborator interaction was detected when uploading an SVG image with an " + technique_name + " payload " \
@@ -2698,7 +2734,6 @@ Response.write(a&c&b)
                    'There might be other issues with file uploads that allow .swf uploads, for example https://hackerone.com/reports/51265 .'
             issue = self._create_issue_template(injector.get_brr(), title, desc, "Firm", "Medium")
             # TODO feature: Check if other content_types work too rather than only application/x-shockwave-flash...
-            # TODO feature: Also, check_xss means the swf can not be delivered with Content-Disposition: attachment... correct?
             self.dl_matchers.add(DownloadMatcher(issue, filecontent=content, check_xss=True))
             self._send_simple(injector, self.SWF_TYPES, basename, content, redownload=True)
         return []
@@ -3435,7 +3470,6 @@ trailer <<
         issue = self._create_issue_template(injector.get_brr(), title, desc, confidence, "Information")
         self._add_scan_issue(issue)
 
-
     def _quirks_with_passive(self, injector):
         if not injector.get_uploaded_filename():
             # If the request does not contain a filename, there is no point in doing these requests
@@ -3475,7 +3509,7 @@ trailer <<
         title = "Backspace filename truncate"
         desc = "We uploaded a filename of " + backspace + " (having the 0x08 backspace character several time at the end) and detected that it's possible to download a file named " + BurpExtender.MARKER_URL_CONTENT + " ."
         issue = self._create_issue_template(base_request_response, title, desc, "Certain", "Low")
-        exp = BurpExtender.DOWNLOAD_ME + "Backspace"+random_part+".exe"
+        exp = BurpExtender.DOWNLOAD_ME + "Backspace" + random_part + ".exe"
         self.dl_matchers.add(DownloadMatcher(issue, filename_content_disposition=exp,
                                              not_in_filename_content_disposition=file_extension))
         self.dl_matchers.add(DownloadMatcher(issue, url_content=exp, not_in_url_content=file_extension, filecontent=orig_content))
@@ -3493,10 +3527,10 @@ trailer <<
         expected_filenames = (
             left_to_right,
             BurpExtender.DOWNLOAD_ME + file_extension[::-1] + random_part_reverse + "lefttoright" + ".exe",
-            BurpExtender.DOWNLOAD_ME + "%E2%80%AEexe.thgirottfel"+ random_part + file_extension,
-            BurpExtender.DOWNLOAD_ME + "%e2%80%aeexe.thgirottfel"+ random_part + file_extension,
-            BurpExtender.DOWNLOAD_ME + "%u202Eexe.thgirottfel"+ random_part + file_extension,
-            BurpExtender.DOWNLOAD_ME + "%u202eexe.thgirottfel"+ random_part + file_extension,
+            BurpExtender.DOWNLOAD_ME + "%E2%80%AEexe.thgirottfel" + random_part + file_extension,
+            BurpExtender.DOWNLOAD_ME + "%e2%80%aeexe.thgirottfel" + random_part + file_extension,
+            BurpExtender.DOWNLOAD_ME + "%u202Eexe.thgirottfel" + random_part + file_extension,
+            BurpExtender.DOWNLOAD_ME + "%u202eexe.thgirottfel" + random_part + file_extension,
         )
         for exp in expected_filenames:
             self.dl_matchers.add(DownloadMatcher(issue, filename_content_disposition=exp))
@@ -3686,7 +3720,7 @@ trailer <<
                 print "Recursive Uploader doing", new_filename, mime_type
                 req = injector.get_request(new_filename, content, mime_type)
                 if req:
-                    self._make_http_request(injector, req)
+                    self._make_http_request(injector, req, redownload_filename=new_filename)
 
                 # Combine with replacer
                 if injector.opts.ru_combine_with_replacer and burp_colab:
@@ -3699,7 +3733,7 @@ trailer <<
                                 print "Recursive Uploader doing", new_filename, mime_type, colab_url
                                 req = injector.get_request(new_filename, content, mime_type)
                                 if req:
-                                    urr = self._make_http_request(injector, req)
+                                    urr = self._make_http_request(injector, req, redownload_filename=new_filename)
                                     if urr:
                                         colab_tests.append(ColabTest(colab_url, urr, issue))
         return colab_tests
@@ -4668,6 +4702,7 @@ class BurpCollaborator:
     # As we currently do around 2000 files, where only max. half of them have Collaborator payloads, 33 is fine.
     # Let's be on the safe side and do 34
     FIXED_PAYLOAD_SIZE = 34
+    # *must* be an uppercase letter
     PADDING_CHAR = "N"
 
     # A IBurpCollaboratorClientContext object that also knows if the
@@ -4717,13 +4752,10 @@ class BurpCollaborator:
                 payload = payload + "/" + (padding - 1) * BurpCollaborator.PADDING_CHAR
             else:
                 # DNS Form: payload.burpcollaborator.net
-                # We create: NNNNN.payload.burpcollaborator.net
-                if padding == 1:
-                    # Because .payload.burpcollaborator.net  is invalid but
-                    #          payload.burpcollaborator.net. isn't
-                    payload += "."
-                else:
-                    payload = (padding - 1) * BurpCollaborator.PADDING_CHAR + "." + payload
+                # We create: NNNpayload.burpcollaborator.net
+                # Do *not* use a dot between NNN and payload as the
+                # Collaborator TLS certificate is not valid for such a domain
+                payload = padding * BurpCollaborator.PADDING_CHAR + payload
         return payload
 
     def remove_padding(self, payload):
@@ -4736,10 +4768,8 @@ class BurpCollaborator:
                 payload = payload[:-1]
         else:
             # DNS Form: payload.burpcollaborator.net
+            # This works because Burp Collaborator payload never contains upper case characters
             while payload.startswith(BurpCollaborator.PADDING_CHAR):
-                payload = payload[1:]
-            if payload.startswith("."):
-                # Remove / as well:
                 payload = payload[1:]
         return payload
 
@@ -4827,6 +4857,12 @@ class FlexiInjector(Injector):
             # one line base64: alphanum, %2B, %2F
             lambda x: urllib.quote(x.encode("base64").replace('\n', '').replace('\r', '').strip()),
             # one line base64: alphanum, %2B, /
+            
+            lambda x: x.encode("base64").replace('\n', '').replace('\r', '').strip().rstrip('='),  # one line base64: alphanum, +, / but missing end =
+            lambda x: urllib.quote(x.encode("base64").replace('\n', '').replace('\r', '').strip().rstrip('='), ''),
+            # one line base64: alphanum, %2B, %2F but missing end =
+            lambda x: urllib.quote(x.encode("base64").replace('\n', '').replace('\r', '').strip().rstrip('=')),
+            # one line base64: alphanum, %2B, / but missing end =
         ]
         self._default_file_extension = FloydsHelpers.u2s(os.path.splitext(self.opts.fi_ofilename)[1]) or ''
 
@@ -5009,13 +5045,20 @@ class MultipartInjector(Injector):
                         # print "Replacing old filename", old_filename, "with new", new_filename, "in multipart number", index
                         new_multipart = multipart.replace(old_filename, new_filename)
                         multiparts[index] = new_multipart
-            # Now also take care that a filename in the URL is replaced with the new filename
+            # A filename in the URL is replaced with the new filename
             if self.opts.replace_filename and old_filename and old_filename != new_filename:
                 status_line = status_headers.split(self._newline)[0]
                 headers = self._newline.join(status_headers.split(self._newline)[1:])
                 status_line = status_line.replace(old_filename, urllib.quote(new_filename))
                 status_line = status_line.replace(urllib.quote(old_filename), urllib.quote(new_filename))
                 status_headers = status_line + self._newline + headers
+            # The file size in the URL is replaced with the new filename
+            if self.opts.replace_filesize and old_size > 100 and old_size and old_size != new_size:
+                status_line = status_headers.split(self._newline)[0]
+                if old_size in status_line:
+                    headers = self._newline.join(status_headers.split(self._newline)[1:])
+                    status_line = status_line.replace(old_size, new_size)
+                    status_headers = status_line + self._newline + headers
             # Now finally set the file content
             new = self._set_multipart_content(multiparts[meant_multipart_index], content, content_type)
             if new:
@@ -7031,7 +7074,7 @@ class FingerpingFingerprints:
                              {'Compression': 14, 'two_plte_chunk': 13, 'modified_phys': 13, 'unknown_critical_chunk': 10, 'idat_bad_zlib_method': 10, 'transparent_bkdred': 11, 'unknown_critical_chunk_bad_checksum': 10, 'chunk_with_number_in_name_before_idat': 10, 'ihdr_too_long': 10, 'indexed_no_plte': 10, 'control_rgba': 10, 'ihdr_invalid_filter_method': 10, 'truncated_chunk': 10, 'ihdr_height_0': 10, 'ihdr_widthheight0': 10, 'two_ihdr_chunk': 13, 'filters indexed': [1, 2, 4], 'gamma_four_and_srgb': 0, 'junk_after_iend': 10, 'truecolor_trns_chunk': 11, 'control_8bit_i': 10, 'png48': 10, 'invalid_length_iend': 10, 'Checksums': 11, 'first_idat_empty': 10, 'idat_junk_after_lz': 10, 'ihdr_too_short': 10, 'truecolor_alpha_trns_chunk': 11, 'idat_empty_zlib_object': 10, 'control_grayscale': 10, 'idat_bad_zlib_checkbits': 10, 'CVE-2014-0333': 10, 'ihdr_width_0': 10, 'invalid_iccp_2': 10, 'invalid_iccp_1': 10, 'mng_file': 10, 'jng_file': 10, 'no_iend': 10, 'nonconsecutive_idat': 10, 'transparent_truncated_palette': 10, 'invalid_name_ancillary_public_chunk_before_idat_bad_checksum': 10, 'invalid_name_reserved_bit_ancillary_public_chunk_before_idat': 10, 'gamma_four_nosrgb': 0, 'ihdr_invalid_compression_method': 10, 'invalid_name_ancillary_public_chunk_before_idat': 10, 'CESA-2004-001': 10, 'idat_bad_filter': 13, 'control_8bit': 10, 'iend_before_idat': 10, 'ihdr_not_first_chunk': 10, 'idat_bad_zlib_checksum': 10, 'grayscale_with_plte': 10, 'plte_after_idat': 10, 'filters RGB': [1, 2, 4], 'invalid_name_ancillary_private_chunk_before_idat': 10, 'idat_too_much_data': 10, 'black_white': 10, 'ios_cgbl_chunk': 10, 'png64': 10, 'idat_zlib_invalid_window': 10}),
 
         FingerpingFingerprint("No processing (server returns images unmodified)", "Servers that do not modify the image have this kind of behavior.",
-                              {'Compression': 12, 'two_plte_chunk': 11, 'modified_phys': 13, 'unknown_critical_chunk': 10, 'idat_bad_zlib_method': 4, 'transparent_bkdred': 13, 'unknown_critical_chunk_bad_checksum': 10, 'chunk_with_number_in_name_before_idat': 10, 'ihdr_too_long': 3, 'indexed_no_plte': 10, 'control_rgba': 10, 'ihdr_invalid_filter_method': 10, 'truncated_chunk': 2, 'ihdr_height_0': 10, 'ihdr_widthheight0': 10, 'two_ihdr_chunk': 11, 'filters indexed': [0], 'gamma_four_and_srgb': 13, 'junk_after_iend': 10, 'truecolor_trns_chunk': 13, 'control_8bit_i': 4, 'png48': 10, 'invalid_length_iend': 10, 'Checksums': 11, 'first_idat_empty': 10, 'idat_junk_after_lz': 10, 'ihdr_too_short': 3, 'truecolor_alpha_trns_chunk': 11, 'idat_empty_zlib_object': 4, 'control_grayscale': 10, 'idat_bad_zlib_checkbits': 4, 'CVE-2014-0333': 4, 'ihdr_width_0': 4, 'invalid_iccp_2': 10, 'invalid_iccp_1': 10, 'mng_file': 0, 'jng_file': 0, 'no_iend': 2, 'nonconsecutive_idat': 10, 'transparent_truncated_palette': 10, 'invalid_name_ancillary_public_chunk_before_idat_bad_checksum': 10, 'invalid_name_reserved_bit_ancillary_public_chunk_before_idat': 10, 'gamma_four_nosrgb': 0, 'ihdr_invalid_compression_method': 10, 'invalid_name_ancillary_public_chunk_before_idat': 10, 'CESA-2004-001': 10, 'idat_bad_filter': 13, 'control_8bit': 10, 'iend_before_idat': 4, 'ihdr_not_first_chunk': 10, 'idat_bad_zlib_checksum': 4, 'grayscale_with_plte': 10, 'plte_after_idat': 10, 'filters RGB': [0], 'invalid_name_ancillary_private_chunk_before_idat': 10, 'idat_too_much_data': 10, 'black_white': 4, 'ios_cgbl_chunk': 4, 'png64': 10, 'idat_zlib_invalid_window': 4}),
+                              {'Compression': 12, 'two_plte_chunk': 11, 'modified_phys': 13, 'unknown_critical_chunk': 10, 'idat_bad_zlib_method': 4, 'transparent_bkdred': 13, 'unknown_critical_chunk_bad_checksum': 10, 'chunk_with_number_in_name_before_idat': 10, 'ihdr_too_long': 3, 'indexed_no_plte': 10, 'control_rgba': 10, 'ihdr_invalid_filter_method': 10, 'truncated_chunk': 2, 'ihdr_height_0': 10, 'ihdr_widthheight0': 10, 'two_ihdr_chunk': 11, 'filters indexed': [0], 'gamma_four_and_srgb': 13, 'junk_after_iend': 10, 'truecolor_trns_chunk': 13, 'control_8bit_i': 4, 'png48': 10, 'invalid_length_iend': 10, 'Checksums': 11, 'first_idat_empty': 10, 'idat_junk_after_lz': 10, 'ihdr_too_short': 3, 'truecolor_alpha_trns_chunk': 11, 'idat_empty_zlib_object': 4, 'control_grayscale': 10, 'idat_bad_zlib_checkbits': 4, 'CVE-2014-0333': 4, 'ihdr_width_0': 4, 'invalid_iccp_2': 10, 'invalid_iccp_1': 10, 'mng_file': 0, 'jng_file': 0, 'no_iend': 2, 'nonconsecutive_idat': 10, 'transparent_truncated_palette': 10, 'invalid_name_ancillary_public_chunk_before_idat_bad_checksum': 10, 'invalid_name_reserved_bit_ancillary_public_chunk_before_idat': 10, 'gamma_four_nosrgb': 13, 'ihdr_invalid_compression_method': 10, 'invalid_name_ancillary_public_chunk_before_idat': 10, 'CESA-2004-001': 10, 'idat_bad_filter': 13, 'control_8bit': 10, 'iend_before_idat': 4, 'ihdr_not_first_chunk': 10, 'idat_bad_zlib_checksum': 4, 'grayscale_with_plte': 10, 'plte_after_idat': 10, 'filters RGB': [0], 'invalid_name_ancillary_private_chunk_before_idat': 10, 'idat_too_much_data': 10, 'black_white': 4, 'ios_cgbl_chunk': 4, 'png64': 10, 'idat_zlib_invalid_window': 4}),
 
         FingerpingFingerprint("Dart", "Dart Image 1.1.21 https://pub.dartlang.org/packages/image",
                               {'black_white': 10, 'control_8bit_i': 10, 'Compression': 11, 'ihdr_too_long': 10, 'ihdr_height_0': 10, 'invalid_name_reserved_bit_ancillary_public_chunk_before_idat': 10, 'idat_bad_zlib_method': 0, 'truecolor_trns_chunk': 11, 'gamma_four_and_srgb': 11, 'truecolor_alpha_trns_chunk': 11, 'invalid_length_iend': 10, 'nonconsecutive_idat': 10, 'filters RGB': [4], 'ihdr_width_0': 0, 'unknown_critical_chunk_bad_checksum': 10, 'two_plte_chunk': 12, 'idat_bad_filter': 0, 'CESA-2004-001': 0, 'ihdr_widthheight0': 10, 'no_iend': 0, 'jng_file': 10, 'control_8bit': 10, 'transparent_truncated_palette': 10, 'filters indexed': [4], 'transparent_bkdred': 11, 'two_ihdr_chunk': 12, 'idat_too_much_data': 10, 'invalid_name_ancillary_public_chunk_before_idat': 10, 'idat_empty_zlib_object': 0, 'truncated_chunk': 0, 'png64': 10, 'idat_junk_after_lz': 10, 'invalid_iccp_2': 10, 'ihdr_not_first_chunk': 10, 'control_rgba': 10, 'chunk_with_number_in_name_before_idat': 10, 'first_idat_empty': 10, 'invalid_name_ancillary_public_chunk_before_idat_bad_checksum': 10, 'png48': 10, 'unknown_critical_chunk': 10, 'iend_before_idat': 0, 'invalid_iccp_1': 10, 'idat_bad_zlib_checksum': 0, 'modified_phys': 11, 'invalid_name_ancillary_private_chunk_before_idat': 10, 'mng_file': 0, 'grayscale_with_plte': 10, 'ihdr_too_short': 0, 'gamma_four_nosrgb': 11, 'junk_after_iend': 10, 'indexed_no_plte': 0, 'plte_after_idat': 10, 'ihdr_invalid_compression_method': 10, 'idat_bad_zlib_checkbits': 0, 'CVE-2014-0333': 10, 'ios_cgbl_chunk': 0, 'Checksums': 11, 'control_grayscale': 10, 'idat_zlib_invalid_window': 10, 'ihdr_invalid_filter_method': 0}),
@@ -7082,8 +7125,13 @@ class FingerpingFingerprints:
                               {'black_white': 4, 'control_8bit_i': 4, 'Compression': 13, 'ihdr_too_long': 0, 'ihdr_height_0': 0, 'invalid_name_reserved_bit_ancillary_public_chunk_before_idat': 0, 'idat_bad_zlib_method': 0, 'truecolor_trns_chunk': 13, 'gamma_four_and_srgb': 13, 'truecolor_alpha_trns_chunk': 0, 'invalid_length_iend': 10, 'nonconsecutive_idat': 10, 'filters RGB': [0], 'ihdr_width_0': 0, 'unknown_critical_chunk_bad_checksum': 0, 'two_plte_chunk': 12, 'idat_bad_filter': 0, 'CESA-2004-001': 0, 'ihdr_widthheight0': 0, 'no_iend': 0, 'jng_file': 0, 'control_8bit': 10, 'transparent_truncated_palette': 0, 'filters indexed': [0], 'transparent_bkdred': 0, 'two_ihdr_chunk': 12, 'idat_too_much_data': 10, 'invalid_name_ancillary_public_chunk_before_idat': 10, 'idat_empty_zlib_object': 4, 'truncated_chunk': 0, 'png64': 10, 'idat_junk_after_lz': 10, 'invalid_iccp_2': 10, 'ihdr_not_first_chunk': 10, 'control_rgba': 10, 'chunk_with_number_in_name_before_idat': 10, 'first_idat_empty': 10, 'invalid_name_ancillary_public_chunk_before_idat_bad_checksum': 0, 'png48': 10, 'unknown_critical_chunk': 10, 'iend_before_idat': 0, 'invalid_iccp_1': 10, 'idat_bad_zlib_checksum': 0, 'modified_phys': 11, 'invalid_name_ancillary_private_chunk_before_idat': 10, 'mng_file': 0, 'grayscale_with_plte': 0, 'ihdr_too_short': 0, 'gamma_four_nosrgb': 13, 'junk_after_iend': 10, 'indexed_no_plte': 4, 'plte_after_idat': 4, 'ihdr_invalid_compression_method': 0, 'idat_bad_zlib_checkbits': 0, 'CVE-2014-0333': 4, 'ios_cgbl_chunk': 0, 'Checksums': 11, 'control_grayscale': 10, 'idat_zlib_invalid_window': 0, 'ihdr_invalid_filter_method': 0}),
 
         FingerpingFingerprint("Ruby chunky_png", "Ruby chunky_png 1.3.1 https://rubygems.org/gems/chunky_png",
-                              {'black_white': 10, 'control_8bit_i': 10, 'Compression': 13, 'ihdr_too_long': 10, 'ihdr_height_0': 0, 'invalid_name_reserved_bit_ancillary_public_chunk_before_idat': 0, 'idat_bad_zlib_method': 0, 'truecolor_trns_chunk': 13, 'gamma_four_and_srgb': 12, 'truecolor_alpha_trns_chunk': 13, 'invalid_length_iend': 0, 'nonconsecutive_idat': 10, 'filters RGB': [2], 'ihdr_width_0': 0, 'unknown_critical_chunk_bad_checksum': 0, 'two_plte_chunk': 12, 'idat_bad_filter': 0, 'CESA-2004-001': 0, 'ihdr_widthheight0': 0, 'no_iend': 10, 'jng_file': 0, 'control_8bit': 10, 'transparent_truncated_palette': 0, 'filters indexed': [2], 'transparent_bkdred': 13, 'two_ihdr_chunk': 12, 'idat_too_much_data': 10, 'invalid_name_ancillary_public_chunk_before_idat': 10, 'idat_empty_zlib_object': 0, 'truncated_chunk': 0, 'png64': 10, 'idat_junk_after_lz': 10, 'invalid_iccp_2': 10, 'ihdr_not_first_chunk': 10, 'control_rgba': 10, 'chunk_with_number_in_name_before_idat': 10, 'first_idat_empty': 0, 'invalid_name_ancillary_public_chunk_before_idat_bad_checksum': 0, 'png48': 10, 'unknown_critical_chunk': 10, 'iend_before_idat': 10, 'invalid_iccp_1': 10, 'idat_bad_zlib_checksum': 0, 'modified_phys': 11, 'invalid_name_ancillary_private_chunk_before_idat': 10, 'mng_file': 0, 'grayscale_with_plte': 10, 'ihdr_too_short': 10, 'gamma_four_nosrgb': 12, 'junk_after_iend': 0, 'indexed_no_plte': 0, 'plte_after_idat': 10, 'ihdr_invalid_compression_method': 10, 'idat_bad_zlib_checkbits': 0, 'CVE-2014-0333': 0, 'ios_cgbl_chunk': 0, 'Checksums': 11, 'control_grayscale': 10, 'idat_zlib_invalid_window': 0, 'ihdr_invalid_filter_method': 10})
+                              {'black_white': 10, 'control_8bit_i': 10, 'Compression': 13, 'ihdr_too_long': 10, 'ihdr_height_0': 0, 'invalid_name_reserved_bit_ancillary_public_chunk_before_idat': 0, 'idat_bad_zlib_method': 0, 'truecolor_trns_chunk': 13, 'gamma_four_and_srgb': 12, 'truecolor_alpha_trns_chunk': 13, 'invalid_length_iend': 0, 'nonconsecutive_idat': 10, 'filters RGB': [2], 'ihdr_width_0': 0, 'unknown_critical_chunk_bad_checksum': 0, 'two_plte_chunk': 12, 'idat_bad_filter': 0, 'CESA-2004-001': 0, 'ihdr_widthheight0': 0, 'no_iend': 10, 'jng_file': 0, 'control_8bit': 10, 'transparent_truncated_palette': 0, 'filters indexed': [2], 'transparent_bkdred': 13, 'two_ihdr_chunk': 12, 'idat_too_much_data': 10, 'invalid_name_ancillary_public_chunk_before_idat': 10, 'idat_empty_zlib_object': 0, 'truncated_chunk': 0, 'png64': 10, 'idat_junk_after_lz': 10, 'invalid_iccp_2': 10, 'ihdr_not_first_chunk': 10, 'control_rgba': 10, 'chunk_with_number_in_name_before_idat': 10, 'first_idat_empty': 0, 'invalid_name_ancillary_public_chunk_before_idat_bad_checksum': 0, 'png48': 10, 'unknown_critical_chunk': 10, 'iend_before_idat': 10, 'invalid_iccp_1': 10, 'idat_bad_zlib_checksum': 0, 'modified_phys': 11, 'invalid_name_ancillary_private_chunk_before_idat': 10, 'mng_file': 0, 'grayscale_with_plte': 10, 'ihdr_too_short': 10, 'gamma_four_nosrgb': 12, 'junk_after_iend': 0, 'indexed_no_plte': 0, 'plte_after_idat': 10, 'ihdr_invalid_compression_method': 10, 'idat_bad_zlib_checkbits': 0, 'CVE-2014-0333': 0, 'ios_cgbl_chunk': 0, 'Checksums': 11, 'control_grayscale': 10, 'idat_zlib_invalid_window': 0, 'ihdr_invalid_filter_method': 10}),
 
+        FingerpingFingerprint("libvips 8.7.3", "libvips 8.7.3 failOnError=false https://jcupitt.github.io/libvips/",
+                              {'black_white': 10, 'control_8bit_i': 10, 'Compression': 13, 'ihdr_too_long': 0, 'ihdr_height_0': 0, 'invalid_name_reserved_bit_ancillary_public_chunk_before_idat': 10, 'idat_bad_zlib_method': 10, 'truecolor_trns_chunk': 11, 'gamma_four_and_srgb': 12, 'truecolor_alpha_trns_chunk': 11, 'invalid_length_iend': 10, 'nonconsecutive_idat': 10, 'filters RGB': [1, 2, 4], 'ihdr_width_0': 0, 'unknown_critical_chunk_bad_checksum': 0, 'two_plte_chunk': 0, 'idat_bad_filter': 11, 'CESA-2004-001': 0, 'ihdr_widthheight0': 0, 'no_iend': 10, 'jng_file': 0, 'control_8bit': 10, 'transparent_truncated_palette': 10, 'filters indexed': [1, 2, 4], 'transparent_bkdred': 11, 'two_ihdr_chunk': 0, 'idat_too_much_data': 10, 'invalid_name_ancillary_public_chunk_before_idat': 0, 'idat_empty_zlib_object': 10, 'truncated_chunk': 10, 'png64': 10, 'idat_junk_after_lz': 10, 'invalid_iccp_2': 10, 'ihdr_not_first_chunk': 0, 'control_rgba': 10, 'chunk_with_number_in_name_before_idat': 0, 'first_idat_empty': 10, 'invalid_name_ancillary_public_chunk_before_idat_bad_checksum': 0, 'png48': 10, 'unknown_critical_chunk': 0, 'iend_before_idat': 0, 'invalid_iccp_1': 10, 'idat_bad_zlib_checksum': 10, 'modified_phys': 13, 'invalid_name_ancillary_private_chunk_before_idat': 0, 'mng_file': 0, 'grayscale_with_plte': 10, 'ihdr_too_short': 0, 'gamma_four_nosrgb': 12, 'junk_after_iend': 10, 'indexed_no_plte': 0, 'plte_after_idat': 0, 'ihdr_invalid_compression_method': 0, 'idat_bad_zlib_checkbits': 10, 'CVE-2014-0333': 10, 'ios_cgbl_chunk': 0, 'Checksums': 11, 'control_grayscale': 10, 'idat_zlib_invalid_window': 10, 'ihdr_invalid_filter_method': 0}),
+
+        FingerpingFingerprint("SAP gigya", "SAP gigya unknown server side image parser... https://developers.gigya.com/display/GD/accounts.setProfilePhoto+REST",
+                              {'Compression': 12, 'two_plte_chunk': 11, 'modified_phys': 13, 'unknown_critical_chunk': 10, 'idat_bad_zlib_method': 10, 'transparent_bkdred': 13, 'unknown_critical_chunk_bad_checksum': 10, 'chunk_with_number_in_name_before_idat': 10, 'ihdr_too_long': 3, 'indexed_no_plte': 3, 'control_rgba': 10, 'ihdr_invalid_filter_method': 10, 'truncated_chunk': 2, 'ihdr_height_0': 2, 'ihdr_widthheight0': 2, 'two_ihdr_chunk': 11, 'filters indexed': [0], 'gamma_four_and_srgb': 13, 'junk_after_iend': 10, 'truecolor_trns_chunk': 13, 'control_8bit_i': 4, 'png48': 10, 'invalid_length_iend': 10, 'Checksums': 11, 'first_idat_empty': 10, 'idat_junk_after_lz': 10, 'ihdr_too_short': 10, 'truecolor_alpha_trns_chunk': 11, 'idat_empty_zlib_object': 10, 'control_grayscale': 10, 'idat_bad_zlib_checkbits': 10, 'CVE-2014-0333': 4, 'ihdr_width_0': 4, 'invalid_iccp_2': 10, 'invalid_iccp_1': 10, 'mng_file': 10, 'jng_file': 10, 'no_iend': 2, 'nonconsecutive_idat': 10, 'transparent_truncated_palette': 10, 'invalid_name_ancillary_public_chunk_before_idat_bad_checksum': 10, 'invalid_name_reserved_bit_ancillary_public_chunk_before_idat': 10, 'gamma_four_nosrgb': 13, 'ihdr_invalid_compression_method': 10, 'invalid_name_ancillary_public_chunk_before_idat': 10, 'CESA-2004-001': 10, 'idat_bad_filter': 13, 'control_8bit': 10, 'iend_before_idat': 10, 'ihdr_not_first_chunk': 10, 'idat_bad_zlib_checksum': 10, 'grayscale_with_plte': 10, 'plte_after_idat': 10, 'filters RGB': [0], 'invalid_name_ancillary_private_chunk_before_idat': 10, 'idat_too_much_data': 10, 'black_white': 4, 'ios_cgbl_chunk': 4, 'png64': 10, 'idat_zlib_invalid_window': 10}),
     ]
 
 
@@ -7432,10 +7480,14 @@ class DownloadMatcher(object):
 
         self.check_xss = check_xss
 
-        # TODO feature: My tests show, that Content-Disposition: attachment prevents XSS... proof me wrong please!
-        if self.check_xss:
+        # My tests show, that Content-Disposition: attachment prevents XSS...
+        # However, this is not an easy question to answer. It depends on browsers, browser plugins,
+        # browser bugs, which filetypes can be uploaded, if you can achieve HTTP header injection, etc.
+        # See https://markitzeroday.com/xss/bypass/2018/04/17/defeating-content-disposition.html
+        # So this means it is not clearly non-exploitable.
+        #if self.check_xss:
             # It can't be a content-disposition: attachment header (otherwise it's downloaded instead of executed)
-            self.check_not_content_disposition = True
+        #    self.check_not_content_disposition = True
         # It must be the correct content-type:
         self.xss_content_types = ["text/", "application/javascript", "image/svg", "application/x-shockwave-flash"]
         # Additionally we could easily also check if X-Content-Type-Options: nosniff is set or not...
@@ -8607,6 +8659,7 @@ class OptionsPanel(JPanel, DocumentListener, ActionListener):
             self.modules[name].setSelected(serialized_object['modules'][name])
 
         if global_to_tab:
+            self.modules['activescan'].setSelected(False)
             self.modules['fingerping'].setSelected(True)
 
         for name in serialized_object['file_formats']:
